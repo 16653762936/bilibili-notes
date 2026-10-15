@@ -1,0 +1,26 @@
+# 批处理必须保持 CRLF，否则 cmd.exe 会按字节偏移错位执行（本项目踩过这个坑：
+# LF + 多字节中文 + chcp 65001 会让命令行从中间被截断，服务根本起不来）。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 其余文本统一 LF
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.js    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.txt   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# 二进制，禁止任何转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.ico   binary
+*.gif   binary
+*.woff  binary
+*.woff2 binary

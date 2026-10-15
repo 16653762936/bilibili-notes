@@ -1,0 +1,31 @@
+# 便携运行时（体积大，超过 GitHub 单文件上限，不入库）
+/python/
+/ffmpeg/
+/models/
+
+# 用户数据：个人笔记与配置
+/notes/
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 运行产物
+*.log
+.cache/
