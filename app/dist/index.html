@@ -8,7 +8,7 @@
     <link rel="apple-touch-icon" href="/logo-180.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bilibili Notes</title>
-    <script type="module" crossorigin src="/assets/index-1aa1f769.js"></script>
+    <script type="module" crossorigin src="/assets/index-1db6a1e6.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-Dn4-zp63.css">
     <style>
       /* 用图片 logo 替换顶栏与空状态里原来的内联 SVG 图标 */
@@ -54,6 +54,26 @@
       body: JSON.stringify({ download_path: String(dir == null ? "" : dir) })
     }).then(function (r) { return r.json(); }).catch(function () { return null; });
   };
+
+  /* ---------- 原生文件夹选择框 ---------- */
+  function pickDir(input) {
+    if (!input) return Promise.resolve();
+    var original = input.value;
+    return postJSON("/api/pick-directory", {
+      initial: input.value || "",
+      title: "选择下载目录"
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res && res.path) {
+          input.value = res.path;
+          window.__dshSetDownloadDir(res.path);
+        }
+      })
+      .catch(function () {
+        input.value = original;
+      });
+  }
 
   /* ---------- 工具 ---------- */
   function appUrl() {
@@ -206,7 +226,10 @@
       '    </div>',
       '    <div>',
       '      <label class="field-label">下载目录</label>',
-      '      <input class="input mono" id="ds-dl-dir" placeholder="留空 = 系统的「下载」文件夹">',
+      '      <div style="display:flex;gap:8px;align-items:center">',
+      '        <input class="input mono" id="ds-dl-dir" style="flex:1" placeholder="留空 = 系统的「下载」文件夹">',
+      '        <button class="btn btn-sm btn-outline" id="ds-dl-browse" style="white-space:nowrap">浏览…</button>',
+      '      </div>',
       '      <p class="field-hint">这里改了会同步保存到设置页，下次直接用。</p>',
       '    </div>',
       '    <div id="ds-dl-status" style="display:none">',
@@ -238,6 +261,7 @@
       close();
     };
     el("ds-dl-start").onclick = start;
+    el("ds-dl-browse").onclick = function () { pickDir(el("ds-dl-dir")); };
     el("ds-dl-url").addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !st.running) start();
     });
@@ -314,6 +338,23 @@
       var persist = function () { window.__dshSetDownloadDir(input.value); };
       input.addEventListener("change", persist);
       input.addEventListener("focusout", persist);
+    }
+
+    /* 给它配一个「浏览…」按钮：把输入框挪进一行 flex 里，按钮跟在后面 */
+    if (!document.getElementById("ds-cfg-browse")) {
+      var row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:8px;align-items:center";
+      input.parentNode.insertBefore(row, input);
+      row.appendChild(input);
+      input.style.flex = "1";
+      var btn = document.createElement("button");
+      btn.id = "ds-cfg-browse";
+      btn.type = "button";
+      btn.className = "btn btn-sm btn-outline";
+      btn.textContent = "浏览…";
+      btn.style.whiteSpace = "nowrap";
+      btn.onclick = function () { pickDir(input); };
+      row.appendChild(btn);
     }
 
     if (input.dataset.dsSynced === "1") return;

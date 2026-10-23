@@ -6,6 +6,7 @@ Pipeline: parse -> download -> (B站字幕 | 语音转文字) -> DeepSeek -> 截
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import mimetypes
@@ -115,6 +116,13 @@ class DownloadRequest(BaseModel):
     url: str
     download_path: Optional[str] = None
     quality: Optional[str] = None
+
+
+class PickDirRequest(BaseModel):
+    """弹原生文件夹选择框。"""
+
+    initial: Optional[str] = ""
+    title: Optional[str] = "选择下载目录"
 
 
 class SaveRequest(BaseModel):
@@ -577,6 +585,72 @@ async def start_download(req: DownloadRequest):
     )
     tasks[task_id]["handle"] = handle
     return {"task_id": task_id, "download_path": dest}
+
+
+PICK_SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "pick_folder.ps1"
+
+
+@app.post("/api/pick-directory")
+async def pick_directory(req: PickDirRequest):
+    """弹 Windows 原生的文件夹选择框，返回所选目录（取消则空字符串）。
+
+    对话框是阻塞的模态窗口，所以丢到子进程里跑，不占事件循环。
+    """
+    if not media.IS_WINDOWS:
+        raise HTTPException(status_code=501, detail="原生选择框目前只在 Windows 上提供")
+    if not PICK_SCRIPT.is_file():
+        raise HTTPException(status_code=500, detail=f"缺少选择框脚本：{PICK_SCRIPT}")
+
+    def enc(text: Optional[str]) -> str:
+        # 中文走 base64：PowerShell 的命令行参数会被控制台代码页打乱
+        return base64.b64encode((text or "").encode("utf-8")).decode("ascii")
+
+    args = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(PICK_SCRIPT),
+        "-TitleB64",
+        enc(req.title),
+        "-OkLabelB64",
+        enc("选择此文件夹"),
+        "-InitialB64",
+        enc(req.initial),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=900)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise HTTPException(status_code=504, detail="选择框等待超时") from None
+
+    def decode(raw: bytes) -> str:
+        text = raw.decode("utf-8", "replace")
+        if "\ufffd" in text:  # 输出没走 UTF-8（老式控制台），退回本机代码页
+            try:
+                text = raw.decode("mbcs")
+            except (UnicodeDecodeError, LookupError):
+                pass
+        return text
+
+    if out:
+        lines = [ln.strip() for ln in decode(out).splitlines() if ln.strip()]
+        picked = lines[-1] if lines else ""
+    else:
+        picked = ""
+        detail = decode(err or b"").strip()
+        if proc.returncode not in (0, None) and detail:
+            raise HTTPException(status_code=500, detail=f"选择框没能启动：{detail[:300]}")
+
+    if picked and not os.path.isdir(picked):
+        picked = ""
+    return {"path": picked, "cancelled": not picked}
 
 
 @app.get("/api/task/{task_id}")
