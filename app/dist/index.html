@@ -8,7 +8,7 @@
     <link rel="apple-touch-icon" href="/logo-180.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bilibili Notes</title>
-    <script type="module" crossorigin src="/assets/index-75f8ae99.js"></script>
+    <script type="module" crossorigin src="/assets/index-1aa1f769.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-Dn4-zp63.css">
     <style>
       /* 用图片 logo 替换顶栏与空状态里原来的内联 SVG 图标 */
@@ -18,5 +18,343 @@
   </head>
   <body>
     <div id="root"></div>
+
+    <!-- 「下载视频」面板：纯下载，不解析。逻辑见 app/dist 的这份内联脚本 -->
+    <script>
+/* 「下载视频」面板 —— 只下载文件，不解析、不做笔记。
+ *
+ * 前端是已经构建好的 React bundle，没有源码，所以这块用原生 DOM 写，
+ * 通过 window.__dshDownloadUi.open() 由工具栏按钮调用，
+ * 外观复用应用自己的 CSS 变量与 .modal/.btn/.input 类，跟原生弹窗一致。
+ */
+(function () {
+  "use strict";
+
+  var st = { es: null, taskId: null, running: false, done: false };
+
+  function el(id) { return document.getElementById(id); }
+
+  function getJSON(url) {
+    return fetch(url, { cache: "no-store" }).then(function (r) { return r.json(); });
+  }
+
+  function postJSON(url, body) {
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    });
+  }
+
+  /* ---------- 设置页那个输入框用：改动即保存，不打扰 React 自己的保存流程 ---------- */
+  window.__dshSetDownloadDir = function (dir) {
+    return fetch("/api/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ download_path: String(dir == null ? "" : dir) })
+    }).then(function (r) { return r.json(); }).catch(function () { return null; });
+  };
+
+  /* ---------- 工具 ---------- */
+  function appUrl() {
+    var inp = document.querySelector('input[placeholder*="粘贴"]');
+    return inp ? String(inp.value || "").trim() : "";
+  }
+
+  function setBusy(busy) {
+    st.running = busy;
+    var start = el("ds-dl-start");
+    var cancel = el("ds-dl-cancel");
+    var url = el("ds-dl-url");
+    var dir = el("ds-dl-dir");
+    if (start) { start.disabled = busy; start.textContent = busy ? "下载中…" : "开始下载"; }
+    if (cancel) { cancel.textContent = busy ? "取消下载" : "关闭"; }
+    if (url) url.disabled = busy;
+    if (dir) dir.disabled = busy;
+  }
+
+  function showStatus(show) {
+    var box = el("ds-dl-status");
+    if (box) box.style.display = show ? "block" : "none";
+  }
+
+  function setProgress(pct, msg) {
+    var bar = el("ds-dl-bar");
+    var text = el("ds-dl-msg");
+    if (bar) bar.style.width = Math.max(0, Math.min(100, pct)) + "%";
+    if (text) { text.textContent = msg || ""; text.style.color = "var(--fg-3)"; }
+  }
+
+  function setError(msg) {
+    var text = el("ds-dl-msg");
+    var bar = el("ds-dl-bar");
+    if (bar) { bar.style.width = "100%"; bar.style.background = "var(--err)"; }
+    if (text) { text.textContent = msg || "下载失败"; text.style.color = "var(--err)"; }
+  }
+
+  function setResult(path, bytes) {
+    var box = el("ds-dl-result");
+    if (!box) return;
+    if (!path) { box.innerHTML = ""; return; }
+    box.innerHTML = "";
+    var wrap = document.createElement("div");
+    wrap.style.cssText = "margin-top:8px;padding:9px 10px;border:1px solid var(--line);" +
+                         "border-radius:8px;background:var(--bg-2)";
+
+    var line = document.createElement("div");
+    line.style.cssText = "font-size:11px;color:var(--fg-2);word-break:break-all;line-height:1.6";
+    line.textContent = path;
+    wrap.appendChild(line);
+
+    var meta = document.createElement("div");
+    meta.style.cssText = "font-size:10.5px;color:var(--fg-3);margin-top:4px";
+    meta.textContent = bytes ? fmtSize(bytes) : "";
+    wrap.appendChild(meta);
+
+    var btns = document.createElement("div");
+    btns.style.cssText = "display:flex;gap:8px;margin-top:8px";
+
+    var openBtn = document.createElement("button");
+    openBtn.className = "btn btn-sm btn-outline";
+    openBtn.textContent = "打开所在文件夹";
+    openBtn.onclick = function () {
+      postJSON("/api/reveal", { path: path }).catch(function () {});
+    };
+    btns.appendChild(openBtn);
+
+    var copyBtn = document.createElement("button");
+    copyBtn.className = "btn btn-sm btn-outline";
+    copyBtn.textContent = "复制路径";
+    copyBtn.onclick = function () {
+      var done = function () { copyBtn.textContent = "已复制"; };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(path).then(done, function () {});
+      }
+    };
+    btns.appendChild(copyBtn);
+
+    wrap.appendChild(btns);
+    box.appendChild(wrap);
+  }
+
+  function fmtSize(n) {
+    try { n = Number(n); } catch (e) { return ""; }
+    if (!n) return "";
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+    if (n >= 1024) return (n / 1024).toFixed(0) + " KB";
+    return n + " B";
+  }
+
+  /* ---------- SSE 进度 ---------- */
+  function stopStream() {
+    if (st.es) { try { st.es.close(); } catch (e) {} st.es = null; }
+  }
+
+  function follow(taskId) {
+    stopStream();
+    st.taskId = taskId;
+    var es = new EventSource("/api/progress/" + taskId);
+    st.es = es;
+
+    es.onmessage = function (ev) {
+      var data;
+      try { data = JSON.parse(ev.data); } catch (e) { return; }
+      if (data.type === "progress") {
+        setProgress(data.progress || 0, data.message || "下载中…");
+      } else if (data.type === "done") {
+        st.done = true;
+        setProgress(100, "下载完成");
+        setResult(data.path, data.bytes);
+        setBusy(false);
+      } else if (data.type === "error") {
+        setError(data.message || "下载失败");
+        setBusy(false);
+        stopStream();
+      } else if (data.type === "closed") {
+        stopStream();
+        if (!st.done) setBusy(false);
+      }
+    };
+    es.onerror = function () {
+      /* 服务端关闭流后浏览器会报一次 error；如果任务已有结局就不用再提示 */
+      if (st.done) { stopStream(); return; }
+      stopStream();
+      if (st.running) {
+        setError("与后端的进度连接中断了，请看一下运行日志");
+        setBusy(false);
+      }
+    };
+  }
+
+  /* ---------- 面板 ---------- */
+  function build() {
+    var overlay = document.createElement("div");
+    overlay.className = "overlay";
+    overlay.id = "ds-dl-overlay";
+    overlay.style.display = "none";
+    overlay.innerHTML = [
+      '<div class="modal" style="width:560px">',
+      '  <div class="modal-head">',
+      '    <span class="modal-title">下载视频</span>',
+      '    <button class="btn btn-icon btn-ghost" id="ds-dl-x" title="关闭">✕</button>',
+      '  </div>',
+      '  <div class="modal-body">',
+      '    <div>',
+      '      <label class="field-label">视频链接</label>',
+      '      <input class="input" id="ds-dl-url" placeholder="粘贴视频链接">',
+      '      <p class="field-hint">只把视频文件存到本地，不解析、不转写、不生成笔记。</p>',
+      '    </div>',
+      '    <div>',
+      '      <label class="field-label">下载目录</label>',
+      '      <input class="input mono" id="ds-dl-dir" placeholder="留空 = 系统的「下载」文件夹">',
+      '      <p class="field-hint">这里改了会同步保存到设置页，下次直接用。</p>',
+      '    </div>',
+      '    <div id="ds-dl-status" style="display:none">',
+      '      <div style="height:6px;border-radius:4px;background:var(--bg-3);overflow:hidden">',
+      '        <div id="ds-dl-bar" style="height:100%;width:0;background:var(--accent);' +
+              'transition:width .25s ease"></div>',
+      '      </div>',
+      '      <p class="field-hint" id="ds-dl-msg"></p>',
+      '      <div id="ds-dl-result"></div>',
+      '    </div>',
+      '  </div>',
+      '  <div class="modal-foot">',
+      '    <button class="btn btn-sm btn-ghost" id="ds-dl-cancel">关闭</button>',
+      '    <button class="btn btn-primary" id="ds-dl-start" style="min-width:104px">开始下载</button>',
+      '  </div>',
+      '</div>'
+    ].join("");
+    document.body.appendChild(overlay);
+
+    el("ds-dl-x").onclick = close;
+    el("ds-dl-cancel").onclick = function () {
+      if (st.running && st.taskId) {
+        postJSON("/api/cancel/" + st.taskId, {}).catch(function () {});
+        stopStream();
+        setBusy(false);
+        setProgress(0, "已取消");
+        return;
+      }
+      close();
+    };
+    el("ds-dl-start").onclick = start;
+    el("ds-dl-url").addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && !st.running) start();
+    });
+    /* 改完目录就落盘，保证面板和设置页看到的是同一个值 */
+    var dirInput = el("ds-dl-dir");
+    var persist = function () {
+      window.__dshSetDownloadDir(dirInput.value);
+    };
+    dirInput.addEventListener("change", persist);
+    dirInput.addEventListener("blur", persist);
+    overlay.addEventListener("mousedown", function (e) {
+      if (e.target === overlay) close();
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && overlay.style.display !== "none" && !st.running) close();
+    });
+
+    return overlay;
+  }
+
+  function close() {
+    stopStream();
+    var overlay = el("ds-dl-overlay");
+    if (overlay) overlay.style.display = "none";
+    st.taskId = null;
+    st.done = false;
+    setBusy(false);
+  }
+
+  function start() {
+    if (st.running) return;
+    var url = String(el("ds-dl-url").value || "").trim();
+    var dir = String(el("ds-dl-dir").value || "").trim();
+    if (!url) { setProgress(0, "请先粘贴视频链接"); return; }
+    if (!/^https?:\/\//i.test(url)) { setProgress(0, "只支持 http(s) 开头的链接"); return; }
+
+    showStatus(true);
+    st.done = false;
+    el("ds-dl-bar").style.background = "var(--accent)";
+    setResult(null);
+    setProgress(0, "正在提交…");
+    setBusy(true);
+
+    /* 目录一起提交，避免刚改完目录就和保存配置抢跑 */
+    postJSON("/api/download", { url: url, download_path: dir || null })
+      .then(function (r) {
+        return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+      })
+      .then(function (res) {
+        if (!res.ok) {
+          setError((res.body && res.body.detail) || "提交失败");
+          setBusy(false);
+          return;
+        }
+        follow(res.body.task_id);
+      })
+      .catch(function (err) {
+        setError("请求后端失败：" + err);
+        setBusy(false);
+      });
+  }
+
+  /* ---------- 设置页那颗「视频下载目录」输入框 ----------
+   * 它是我们注入的、不属于 React 的 state，所以：
+   *   - 值每次弹窗打开时从后端现取（不用 React 里那份可能过期的 config）
+   *   - 改动用原生事件直接存回后端，不掺和 React 自己的「保存并关闭」
+   */
+  function syncSettingsField() {
+    var input = document.getElementById("ds-cfg-download-dir");
+    if (!input) return;
+
+    if (input.dataset.dsBound !== "1") {
+      input.dataset.dsBound = "1";
+      var persist = function () { window.__dshSetDownloadDir(input.value); };
+      input.addEventListener("change", persist);
+      input.addEventListener("focusout", persist);
+    }
+
+    if (input.dataset.dsSynced === "1") return;
+    input.dataset.dsSynced = "1";
+    getJSON("/api/config").then(function (cfg) {
+      if (document.activeElement !== input) {
+        input.value = (cfg && cfg.download_path) || "";
+      }
+    }).catch(function () {});
+  }
+
+  function watchSettingsField() {
+    if (!document.body) { setTimeout(watchSettingsField, 50); return; }
+    syncSettingsField();
+    /* 设置弹窗关着时整棵子树是 null，打开才会挂载 —— 用 Observer 抓这一下 */
+    new MutationObserver(syncSettingsField)
+      .observe(document.body, { childList: true, subtree: true });
+  }
+
+  window.__dshDownloadUi = {
+    open: function () {
+      syncSettingsField();
+      var overlay = el("ds-dl-overlay") || build();
+      overlay.style.display = "flex";
+      if (!st.running) {
+        var urlInput = el("ds-dl-url");
+        var fromApp = appUrl();
+        if (fromApp) urlInput.value = fromApp;
+        showStatus(st.done);
+        getJSON("/api/config").then(function (cfg) {
+          el("ds-dl-dir").value = (cfg && cfg.download_path) || "";
+        }).catch(function () {});
+        setTimeout(function () { urlInput.focus(); urlInput.select(); }, 30);
+      }
+    },
+    close: close
+  };
+
+  watchSettingsField();
+})();
+
+    </script>
   </body>
 </html>

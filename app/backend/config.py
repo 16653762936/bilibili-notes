@@ -11,6 +11,7 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 DEFAULT_CONFIG = {
     "deepseek_api_key": "",
     "save_path": "",
+    "download_path": "",        # 「下载视频」存到哪；留空 = 系统的「下载」文件夹
     "max_chars": 80000,
     "prompt_template": "",
     # Added in the redesign:
@@ -60,6 +61,7 @@ def public_config() -> dict:
     key = cfg["deepseek_api_key"]
     return {
         "save_path": cfg["save_path"],
+        "download_path": cfg["download_path"],
         "max_chars": cfg["max_chars"],
         "prompt_template": cfg["prompt_template"],
         "whisper_model": cfg["whisper_model"],

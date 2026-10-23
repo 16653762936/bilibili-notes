@@ -27,6 +27,7 @@ from sse_starlette.sse import EventSourceResponse
 from backend import media
 from backend.bilibili_handler import BilibiliError, BilibiliHandler
 from backend.config import DEFAULT_CONFIG, WHISPER_MODELS, load_config, public_config, save_config
+from backend.downloader import DownloadError, download_video
 from backend.note_generator import NoteGenerator, format_duration
 from backend.screenshotter import take_screenshots
 from backend.stt import TranscriptionError, transcribe_audio
@@ -81,6 +82,7 @@ tasks: dict[str, dict] = {}
 class ConfigRequest(BaseModel):
     deepseek_api_key: Optional[str] = None
     save_path: Optional[str] = None
+    download_path: Optional[str] = None
     max_chars: Optional[int] = None
     prompt_template: Optional[str] = None
     sessdata: Optional[str] = None
@@ -105,6 +107,14 @@ class ProcessRequest(BaseModel):
 
 class InspectRequest(BaseModel):
     url: str
+
+
+class DownloadRequest(BaseModel):
+    """纯下载：只要视频文件，不解析、不做笔记。"""
+
+    url: str
+    download_path: Optional[str] = None
+    quality: Optional[str] = None
 
 
 class SaveRequest(BaseModel):
@@ -132,6 +142,16 @@ def resolve_save_path(raw: Optional[str]) -> str:
     if os.path.basename(path.rstrip("/")) != "bilibilinote":
         path = os.path.join(path, "bilibilinote")
     return path
+
+
+def resolve_download_path(raw: Optional[str]) -> str:
+    """「下载视频」存哪：留空就用系统的「下载」文件夹。
+
+    与笔记目录不同，这里**不**再套一层子目录 —— 用户指定哪儿就存哪儿。
+    """
+    if not raw or not str(raw).strip():
+        return os.path.expanduser("~/Downloads")
+    return os.path.expanduser(str(raw).strip())
 
 
 def build_credential():
@@ -423,6 +443,48 @@ async def process_video_background(
         emit("closed")
 
 
+async def download_only_background(
+    task_id: str, url: str, dest_dir: str, quality: str = ""
+) -> None:
+    """纯下载任务：只把视频文件存下来，不解析、不转写、不生成笔记。"""
+    task = tasks.get(task_id) or {}
+    queue: asyncio.Queue = task["queue"]
+
+    def emit(event_type: str, **payload):
+        payload["type"] = event_type
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:  # pragma: no cover - 队列无上限，兜底
+            pass
+
+    try:
+        emit("progress", step="downloading", message="正在获取视频信息…", progress=0)
+
+        def on_progress(percent: float, message: str) -> None:
+            emit("progress", step="downloading", message=message, progress=int(percent))
+
+        result = await download_video(url, dest_dir, on_progress=on_progress, quality=quality)
+        task["download"] = result
+        emit(
+            "done",
+            path=result["path"],
+            download_path=result["dir"],
+            bytes=result["bytes"],
+            title=result["title"],
+        )
+    except DownloadError as exc:
+        emit("error", message=str(exc))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        traceback.print_exc()
+        emit("error", message=f"{type(exc).__name__}: {exc}")
+    finally:
+        emit("closed")
+
+
 # -------------------------------------------------------------------- routes
 
 
@@ -482,6 +544,39 @@ async def inspect_video(req: InspectRequest):
         raise HTTPException(status_code=400, detail=f"解析失败：{exc}") from exc
     finally:
         await handler.close()
+
+
+@app.post("/api/download")
+async def start_download(req: DownloadRequest):
+    """纯下载：把视频存到下载目录，不解析也不做笔记。
+
+    进度复用 ``/api/progress/{task_id}`` 那条 SSE —— 前端已经在用同一套机制。
+    """
+    url = (req.url or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="请先粘贴视频链接")
+    if not re.match(r"^https?://", url):
+        raise HTTPException(status_code=400, detail="只支持 http(s) 开头的视频链接")
+
+    cfg = load_config()
+    dest = resolve_download_path(req.download_path or cfg.get("download_path"))
+    try:
+        os.makedirs(dest, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"下载目录不可用：{dest}（{exc}）") from exc
+
+    task_id = str(uuid.uuid4())[:8]
+    tasks[task_id] = {
+        "queue": asyncio.Queue(),
+        "created": time.time(),
+        "url": url,
+        "kind": "download",
+    }
+    handle = asyncio.create_task(
+        download_only_background(task_id, url, dest, (req.quality or "").strip())
+    )
+    tasks[task_id]["handle"] = handle
+    return {"task_id": task_id, "download_path": dest}
 
 
 @app.get("/api/task/{task_id}")

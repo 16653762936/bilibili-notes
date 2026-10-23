@@ -32,6 +32,22 @@
 
 ---
 
+## 纯下载（不生成笔记）
+
+中栏工具栏除了「解析信息 / 生成笔记」，还有一个 **「下载视频」**：
+把链接里的视频文件原样存到本地，**不解析、不转写、不调 AI、不写笔记**。
+
+- 点开后自动带入输入框里的链接，也可以另外改
+- 面板里可以临时指定下载目录，改完会同步保存到设置页
+- 实时进度（先视频后音频，各自映射到 0–45% / 45–90%，不会倒退）
+- 完成后显示保存路径、文件大小，可「打开所在文件夹」或复制路径
+- 设置页有 **「视频下载目录」** 一项；留空就用系统的「下载」文件夹
+
+底层交给 **yt-dlp**（便携包里自带），所以它能下的站点都能下。
+遇到下不了的站点会给一句中文原因，而不是甩一段 yt-dlp 的英文报错。
+
+---
+
 ## 快速开始
 
 ### 方式一：便携压缩包（推荐，解压即可用）
@@ -110,6 +126,7 @@ BilibiliNotes/
 | GET | `/api/note-asset` | 笔记内图片 |
 | GET | `/api/cover` | B 站封面代理（带缓存） |
 | POST | `/api/inspect` | 只解析视频信息 |
+| POST | `/api/download` | **纯下载**：只把视频存到下载目录，不解析、不做笔记 |
 | POST | `/api/process` | 建任务，开始生成 |
 | GET | `/api/progress/{id}` | SSE 进度流 |
 | GET | `/api/task/{id}` | 取任务结果 |
@@ -156,7 +173,15 @@ BilibiliNotes/
 - 仓库不含便携运行时；`python/`、`ffmpeg/`、`models/` 与 `notes/` 都在 `.gitignore` 中。
   `models/faster-whisper-base/model.bin`（138 MB）与 `ffmpeg/bin/avcodec-63.dll`（114 MB）
   都超过 GitHub 单文件 100 MB 上限。
-- 前端只有构建产物 `app/dist/`，没有源码；上面的文案修复是直接落在构建产物上的，
-  若日后重新构建前端需要同步这些改动。
+- 前端只有构建产物 `app/dist/`，没有源码。所以界面层的改动（macOS 文案、「下载视频」按钮、
+  设置页的下载目录字段）都是**直接改在压缩后的 bundle 上的**，改动清单见
+  [Windows 适配修复记录](#windows-适配修复记录) 与「纯下载」一节；日后若重新构建前端需要同步。
+  「下载视频」面板本身是一个独立的原生 JS 片段，内联在 `app/dist/index.html` 里。
+- **抖音暂不支持**。yt-dlp 的 `DouyinIE` 只调用 `aweme/v1/web/aweme/detail/`，
+  而该接口现在需要 `a_bogus` 签名 + Argus 风控 Cookie（yt-dlp 源码里那句
+  `# TODO: Run verification challenge code to generate signature cookies` 就是这件事）。
+  实测纯 HTTP 各种入口都拿不到数据：详情接口返回 `403 Blocked by ArgusSecurityPlugin`，
+  老的 `iesdouyin` iteminfo 接口返回空，分享页只剩页面壳。所以下载抖音会给出明确提示，
+  不会假装成功。要支持抖音需要单独实现签名（或用浏览器自动化），不在当前实现范围内。
 - `/api/note` 对「笔记目录本身」返回 403 而非 404（安全边界，界面不会走到这条路径）。
 - 生成笔记需要自备 DeepSeek API Key；配置 B 站 Cookie（`SESSDATA`）可大幅提速。
