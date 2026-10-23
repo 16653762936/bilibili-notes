@@ -28,7 +28,7 @@ from sse_starlette.sse import EventSourceResponse
 from backend import media
 from backend.bilibili_handler import BilibiliError, BilibiliHandler
 from backend.config import DEFAULT_CONFIG, WHISPER_MODELS, load_config, public_config, save_config
-from backend.downloader import DownloadError, download_video
+from backend.downloader import DownloadError, download_video, normalize_video_url
 from backend.note_generator import NoteGenerator, format_duration
 from backend.screenshotter import take_screenshots
 from backend.stt import TranscriptionError, transcribe_audio
@@ -511,12 +511,13 @@ async def start_process(req: ProcessRequest):
 
     task_id = str(uuid.uuid4())[:8]
     save_path = resolve_save_path(req.save_path or cfg.get("save_path"))
-    tasks[task_id] = {"queue": asyncio.Queue(), "created": time.time(), "url": req.url}
+    video_url = normalize_video_url(req.url) or (req.url or "").strip()
+    tasks[task_id] = {"queue": asyncio.Queue(), "created": time.time(), "url": video_url}
 
     handle = asyncio.create_task(
         process_video_background(
             task_id,
-            req.url,
+            video_url,
             api_key,
             save_path,
             max_chars=req.max_chars or cfg.get("max_chars") or 80000,
@@ -544,7 +545,7 @@ async def inspect_video(req: InspectRequest):
     """Metadata only — lets the UI show a rich card before processing."""
     handler = BilibiliHandler(build_credential())
     try:
-        info = await handler.parse_video(req.url)
+        info = await handler.parse_video(normalize_video_url(req.url) or req.url)
         return {"ok": True, "video": info, "tooling": media.tooling_report()}
     except BilibiliError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -560,11 +561,13 @@ async def start_download(req: DownloadRequest):
 
     进度复用 ``/api/progress/{task_id}`` 那条 SSE —— 前端已经在用同一套机制。
     """
-    url = (req.url or "").strip()
+    # 分享文案（【标题】https://...）、短链、裸 BV 号都认
+    url = normalize_video_url(req.url)
     if not url:
-        raise HTTPException(status_code=400, detail="请先粘贴视频链接")
-    if not re.match(r"^https?://", url):
-        raise HTTPException(status_code=400, detail="只支持 http(s) 开头的视频链接")
+        raise HTTPException(
+            status_code=400,
+            detail="没从这段内容里找到视频链接，请粘贴视频地址、短链或 BV 号",
+        )
 
     cfg = load_config()
     dest = resolve_download_path(req.download_path or cfg.get("download_path"))

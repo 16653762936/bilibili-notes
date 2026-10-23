@@ -32,6 +32,50 @@ _BOILERPLATE = re.compile(
     re.I | re.S,
 )
 
+# 从一段文字里认出视频地址用
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>\"'）)】\]，。、；]+", re.I)
+_BARE_HOST = re.compile(
+    r"(?:[A-Za-z0-9-]+\.)+(?:com|cn|tv|cc|net|org|io|me|link|ws)/[^\s<>\"'）)】\]，。、；]*",
+    re.I,
+)
+_BV_IN_TEXT = re.compile(r"BV[0-9A-Za-z]{10}")
+_AV_IN_TEXT = re.compile(r"\bav(\d{1,12})\b", re.I)
+_TRAILING = "。，,.、；;！!？?）)】]}>\"'"
+
+
+def normalize_video_url(raw: str) -> str:
+    """把用户粘贴的东西尽量还原成一个能交给 yt-dlp 的地址。
+
+    分享按钮复制出来的往往不是"干净的链接"，比如：
+
+        【归来明月满秦川｜河西新区域「秦川」即将上线！】https://www.bilibili.com/video/BV1Lq...
+
+    也可能只是 ``b23.tv/xxxx``（没带协议）甚至一个裸 BV 号。
+    这里都认，认不出来才返回空串，由调用方给提示。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+
+    m = _URL_IN_TEXT.search(text)
+    if m:
+        return m.group(0).rstrip(_TRAILING)
+
+    m = _BARE_HOST.search(text)
+    if m:
+        return ("https://" + m.group(0)).rstrip(_TRAILING)
+
+    m = _BV_IN_TEXT.search(text)
+    if m:
+        return f"https://www.bilibili.com/video/{m.group(0)}"
+
+    m = _AV_IN_TEXT.search(text)
+    if m:
+        return f"https://www.bilibili.com/video/av{m.group(1)}"
+
+    return ""
+
+
 # 常见失败 -> 一句能照着做的话
 _FRIENDLY: tuple[tuple[re.Pattern, str], ...] = (
     (

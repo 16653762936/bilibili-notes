@@ -250,13 +250,11 @@
     var url = currentUrl();
     showStrip();
     if (!url) {
-      fail("请先在输入框里粘贴视频链接");
+      fail("请先在输入框里粘贴视频链接（整段分享文案也可以）");
       return;
     }
-    if (!/^https?:\/\//i.test(url)) {
-      fail("只支持 http(s) 开头的视频链接");
-      return;
-    }
+    // 不在前端校验格式：链接可能夹在分享文案里、可能是短链或裸 BV 号，
+    // 统一交给后端的 normalize_video_url 处理。
 
     st.running = true;
     setIcon("⏳");
