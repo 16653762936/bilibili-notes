@@ -83,6 +83,29 @@ def _kill(proc: Optional[subprocess.Popen]) -> None:
             pass
 
 
+def _kill_by_profile(profile: str) -> None:
+    """兜底：杀掉还在用这个临时 profile 的浏览器进程。
+
+    无头 Edge 有时会把渲染进程挂到别的父进程下，只 kill 启动器会留下孤儿，
+    所以按 --user-data-dir 的路径再扫一遍。这个调用比较慢，只在需要时用。
+    """
+    if not profile:
+        return
+    name = os.path.basename(profile)
+    if not name:
+        return
+    script = (
+        "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+        f"Where-Object {{ $_.CommandLine -like '*{name}*' }} | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                       capture_output=True, timeout=30)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def resolve_aweme_id(raw: str) -> str:
     """从短链或完整链接里拿到作品 id。"""
     text = (raw or "").strip()
@@ -131,6 +154,7 @@ async def _capture(video_id: str, wait_seconds: float = 30.0) -> dict:
             "--no-default-browser-check",
             "--mute-audio",
             "--disable-extensions",
+            "--autoplay-policy=no-user-gesture-required",
             f"--user-data-dir={profile}",
             f"--remote-debugging-port={port}",
             "--remote-allow-origins=*",
@@ -191,11 +215,29 @@ async def _capture(video_id: str, wait_seconds: float = 30.0) -> dict:
             await call("Page.enable")
             await call("Page.navigate", url=url)
 
+            # 无头模式页面不会自己开播，不开播就不会请求视频流。
+            # 所以每隔一小会儿催一次 play()，音视频请求才会真的发出去
+            # （实测：不催 30 秒也拿不到；催了 3.5 秒就拿到）。
+            NUDGE = (
+                "(()=>{const v=document.querySelector('video');"
+                "if(!v)return 'no-video';"
+                "try{v.muted=true;}catch(e){}"
+                "if(v.paused){try{v.play&&v.play().catch(()=>{});}catch(e){}}"
+                "return v.readyState>0?'playing':'loading';})()"
+            )
+
             deadline = time.time() + wait_seconds
+            last_nudge = 0.0
             while time.time() < deadline:
                 if media_urls["video"] and media_urls["audio"]:
                     break
-                await asyncio.sleep(1.0)
+                if time.time() - last_nudge > 1.2:
+                    last_nudge = time.time()
+                    try:
+                        await call("Runtime.evaluate", expression=NUDGE, returnByValue=True)
+                    except Exception:  # noqa: BLE001
+                        pass
+                await asyncio.sleep(0.3)
 
             # 顺手把标题、封面和时长捞出来（时长读播放器自身的元数据）
             try:
@@ -216,10 +258,25 @@ async def _capture(video_id: str, wait_seconds: float = 30.0) -> dict:
                 meta.update(json.loads(raw))
             except Exception:  # noqa: BLE001
                 pass
+
+            # 让浏览器自己退出，比起 kill 更干净，也不容易留孤儿进程
+            try:
+                await ws.send(json.dumps({"id": 999999, "method": "Browser.close"}))
+            except Exception:  # noqa: BLE001
+                pass
     finally:
         _kill(proc)
-        await asyncio.sleep(0.5)
-        shutil.rmtree(profile, ignore_errors=True)
+        for _ in range(8):
+            if not os.path.isdir(profile):
+                break
+            shutil.rmtree(profile, ignore_errors=True)
+            if not os.path.isdir(profile):
+                break
+            await asyncio.sleep(0.3)
+        if os.path.isdir(profile):
+            _kill_by_profile(profile)
+            await asyncio.sleep(0.3)
+            shutil.rmtree(profile, ignore_errors=True)
 
     if not media_urls["video"]:
         raise DouyinError(
