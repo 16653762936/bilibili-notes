@@ -25,8 +25,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from backend import douyin_handler
 from backend import media
 from backend.bilibili_handler import BilibiliError, BilibiliHandler
+from backend.douyin_handler import DouyinError
 from backend.config import DEFAULT_CONFIG, WHISPER_MODELS, load_config, public_config, save_config
 from backend.downloader import DownloadError, download_video, normalize_video_url
 from backend.note_generator import NoteGenerator, format_duration
@@ -180,6 +182,17 @@ def format_duration_short(seconds) -> str:
     return format_duration(seconds) or ""
 
 
+def build_video_handler(url: str):
+    """按站点挑处理器。
+
+    抖音的取流要借真实浏览器（签名在页面 JS 里现算），接口与
+    BilibiliHandler 对齐，所以后面的流水线不需要区分站点。
+    """
+    if douyin_handler.is_douyin(url):
+        return douyin_handler.DouyinHandler()
+    return BilibiliHandler(build_credential())
+
+
 def _read_frontmatter(text: str) -> dict:
     if not text.startswith("---"):
         return {}
@@ -208,7 +221,7 @@ async def process_video_background(
 ):
     """Parse -> download -> transcript -> summarise -> screenshots -> preview."""
     cfg = load_config()
-    handler = BilibiliHandler(build_credential())
+    handler = build_video_handler(url)
     task = tasks[task_id]
     started = time.time()
     loop = asyncio.get_running_loop()
@@ -268,7 +281,7 @@ async def process_video_background(
         media_files.extend([video_path, audio_path])
 
         # 3 ── subtitles, else speech-to-text --------------------------------
-        emit_progress("extracting", "正在检查 B 站字幕…", 42)
+        emit_progress("extracting", "正在检查是否有现成字幕…", 42)
         subtitle = None
         try:
             subtitle = await asyncio.wait_for(
@@ -296,7 +309,9 @@ async def process_video_background(
             emit_progress("extracting", "字幕提取成功", 68)
             emit("transcript", source=transcript_source, chars=len(transcript), segments=subtitle.get("segments", []))
         else:
-            hint = "" if cfg.get("sessdata") else "（未配置 B站 Cookie，无法使用官方字幕）"
+            hint = ""
+            if info.get("platform") != "Douyin" and not cfg.get("sessdata"):
+                hint = "（未配置 B站 Cookie，无法使用官方字幕）"
             emit_progress("transcribing", f"没有可用字幕{hint}，开始语音转文字…", 44)
 
             def on_stt(value):
@@ -434,7 +449,7 @@ async def process_video_background(
         emit_progress("screenshots", "处理完成，请预览后保存", 100)
         emit("preview", result=result)
 
-    except (BilibiliError, TranscriptionError) as exc:
+    except (BilibiliError, DouyinError, TranscriptionError) as exc:
         emit("error", message=str(exc))
     except asyncio.CancelledError:
         raise
@@ -471,7 +486,14 @@ async def download_only_background(
         def on_progress(percent: float, message: str) -> None:
             emit("progress", step="downloading", message=message, progress=int(percent))
 
-        result = await download_video(url, dest_dir, on_progress=on_progress, quality=quality)
+        if douyin_handler.is_douyin(url):
+            result = await douyin_handler.download_merged(
+                url, dest_dir, on_progress=on_progress
+            )
+        else:
+            result = await download_video(
+                url, dest_dir, on_progress=on_progress, quality=quality
+            )
         task["download"] = result
         emit(
             "done",
@@ -480,7 +502,7 @@ async def download_only_background(
             bytes=result["bytes"],
             title=result["title"],
         )
-    except DownloadError as exc:
+    except (DownloadError, DouyinError) as exc:
         emit("error", message=str(exc))
     except asyncio.CancelledError:
         raise
@@ -543,12 +565,15 @@ async def cancel_task(task_id: str):
 @app.post("/api/inspect")
 async def inspect_video(req: InspectRequest):
     """Metadata only — lets the UI show a rich card before processing."""
-    handler = BilibiliHandler(build_credential())
+    target = normalize_video_url(req.url) or req.url
+    handler = build_video_handler(target)
     try:
-        info = await handler.parse_video(normalize_video_url(req.url) or req.url)
+        info = await handler.parse_video(target)
         return {"ok": True, "video": info, "tooling": media.tooling_report()}
     except BilibiliError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DouyinError as exc:
+        raise HTTPException(status_code=400, detail=f"抖音解析失败：{exc}") from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"解析失败：{exc}") from exc
     finally:

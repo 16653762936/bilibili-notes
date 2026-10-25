@@ -78,11 +78,13 @@ class NoteGenerator:
         md.append(f'title: "{escape_yaml(note_title)}"')
         md.append(f"source: {base_url}")
         md.append(f"date: {today.strftime('%Y-%m-%d')}")
-        md.append("platform: Bilibili")
+        platform = video.get("platform") or "Bilibili"
+        md.append(f"platform: {platform}")
         if result.get("note_style_label"):
             md.append(f'note_type: "{result["note_style_label"]}"')
         if video.get("bvid"):
-            md.append(f"bvid: {video['bvid']}")
+            id_key = "douyin_id" if platform == "Douyin" else "bvid"
+            md.append(f"{id_key}: {video['bvid']}")
         if video.get("owner", {}).get("name"):
             md.append(f'uploader: "{escape_yaml(video["owner"]["name"])}"')
         if video.get("duration"):
@@ -194,8 +196,14 @@ def escape_yaml(text: str) -> str:
 
 
 def time_link(base_url: str, time_str: str) -> str:
-    """``https://.../video/BVxxx?t=83`` opens the player at that second."""
+    """``https://.../video/BVxxx?t=83`` opens the player at that second.
+
+    这个 ``?t=`` 只有 B 站认。抖音之类的站点没有等价的起播参数，
+    就退回原链接，避免生成一个点了没反应的假链接。
+    """
     if not base_url or not time_str:
+        return base_url
+    if "bilibili.com" not in base_url:
         return base_url
     seconds = 0
     for part in str(time_str).split(":"):
