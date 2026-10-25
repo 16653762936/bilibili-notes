@@ -50,6 +50,44 @@ class DouyinError(Exception):
     """可直接展示给用户的中文消息。"""
 
 
+# ── 复用与缓存 ────────────────────────────────────────────────────────────
+# 每次解析都从零起一个浏览器、用冷缓存加载抖音页面，是慢的主因
+# （实测 video 元素要 3.2 秒才出现）。所以：
+#   1. 浏览器 profile 固定保留，抖音的 JS/素材走本地缓存；
+#   2. 取到的流地址按作品 id 缓存 10 分钟，
+#      「解析信息 → 生成笔记」这种连续操作就不用再开一次浏览器。
+_PROFILE_DIR = os.path.join(os.path.expanduser("~/.bilibili-notes/cache"), "browser-profile")
+_CACHE_TTL = 600.0
+_capture_cache: dict[str, tuple[float, dict]] = {}
+_browser_lock: Optional[asyncio.Lock] = None
+
+
+def _lock() -> asyncio.Lock:
+    global _browser_lock
+    if _browser_lock is None:
+        _browser_lock = asyncio.Lock()
+    return _browser_lock
+
+
+def _cache_get(video_id: str) -> Optional[dict]:
+    hit = _capture_cache.get(video_id)
+    if not hit:
+        return None
+    at, data = hit
+    if time.time() - at > _CACHE_TTL:
+        _capture_cache.pop(video_id, None)
+        return None
+    return data
+
+
+def _cache_put(video_id: str, data: dict) -> None:
+    _capture_cache[video_id] = (time.time(), data)
+
+
+def _cache_drop(video_id: str) -> None:
+    _capture_cache.pop(video_id, None)
+
+
 def is_douyin(url: str) -> bool:
     return bool(re.search(r"(?:^|\.)douyin\.com|iesdouyin\.com", url or "", re.I))
 
@@ -130,19 +168,34 @@ async def resolve_aweme_id(raw: str) -> str:
     raise DouyinError("这个抖音链接里没有找到作品 id，可能不是视频链接")
 
 
-async def _capture(video_id: str, wait_seconds: float = 30.0) -> dict:
+async def _capture(video_id: str, wait_seconds: float = 25.0) -> dict:
     """启动无头浏览器，截获页面自己请求到的音视频地址。"""
+    cached = _cache_get(video_id)
+    if cached:
+        return cached
+
+    # 固定 profile 意味着同一时刻只能有一个浏览器用它，串行化即可
+    async with _lock():
+        cached = _cache_get(video_id)
+        if cached:
+            return cached
+        result = await _capture_live(video_id, wait_seconds)
+        _cache_put(video_id, result)
+        return result
+
+
+async def _capture_live(video_id: str, wait_seconds: float = 25.0, attempt: int = 1) -> dict:
     try:
         import websockets  # noqa: F401  延迟导入：缺了也不该拖垮整个后端
     except ImportError as exc:  # pragma: no cover
         raise DouyinError("缺少 websockets 依赖，无法驱动浏览器取流") from exc
 
-    import websockets  # 上面已确认可用
+    import websockets
 
     browser = find_browser()
     port = _free_port()
-    profile = os.path.join(tempfile.gettempdir(), f"bnotes-douyin-{port}")
-    shutil.rmtree(profile, ignore_errors=True)
+    profile = _PROFILE_DIR
+    os.makedirs(profile, exist_ok=True)
 
     url = f"https://www.douyin.com/video/{video_id}"
     proc = subprocess.Popen(
@@ -185,6 +238,11 @@ async def _capture(video_id: str, wait_seconds: float = 30.0) -> dict:
                 await asyncio.sleep(0.5)
 
         if not page:
+            # 上一次的浏览器可能没退干净，占着 profile。清掉再试一次。
+            if attempt == 1:
+                _kill_by_profile(profile)
+                await asyncio.sleep(0.6)
+                return await _capture_live(video_id, wait_seconds, attempt=2)
             raise DouyinError("浏览器没能启动（可能是被安全软件拦了）")
 
         async with websockets.connect(page["webSocketDebuggerUrl"], max_size=64 << 20,
@@ -265,18 +323,10 @@ async def _capture(video_id: str, wait_seconds: float = 30.0) -> dict:
             except Exception:  # noqa: BLE001
                 pass
     finally:
+        # profile 要留着复用（抖音的 JS/素材走本地缓存，下次打开更快），
+        # 所以这里只收进程，不删目录。
         _kill(proc)
-        for _ in range(8):
-            if not os.path.isdir(profile):
-                break
-            shutil.rmtree(profile, ignore_errors=True)
-            if not os.path.isdir(profile):
-                break
-            await asyncio.sleep(0.3)
-        if os.path.isdir(profile):
-            _kill_by_profile(profile)
-            await asyncio.sleep(0.3)
-            shutil.rmtree(profile, ignore_errors=True)
+        await asyncio.sleep(0.2)
 
     if not media_urls["video"]:
         raise DouyinError(
@@ -376,7 +426,7 @@ class DouyinHandler:
         progress_cb: Optional[Callable[[dict], None]] = None,
     ) -> tuple[str, Optional[str]]:
         video_id = info.get("aweme_id") or info.get("bvid") or ""
-        captured = self._cache.get(video_id)
+        captured = _cache_get(video_id) or self._cache.get(video_id)
         if not captured:
             captured = await _capture(video_id)
             self._cache[video_id] = captured
@@ -390,11 +440,25 @@ class DouyinHandler:
             if progress_cb:
                 progress_cb({"percent": pct, "message": message})
 
+        async def fetch_all(media: dict) -> None:
+            await _download(media["video"], video_path)
+            if audio_path and media.get("audio"):
+                await _download(media["audio"], audio_path)
+
         report("正在下载抖音视频…", 5.0)
-        await _download(captured["video"], video_path)
+        try:
+            await fetch_all(captured)
+        except httpx.HTTPStatusError as exc:
+            # 缓存里的地址过期了（抖音的直链有时效），重取一次再下
+            if exc.response is not None and exc.response.status_code in (401, 403, 404):
+                report("视频地址过期，正在重新获取…", 5.0)
+                _cache_drop(video_id)
+                captured = await _capture(video_id)
+                self._cache[video_id] = captured
+                await fetch_all(captured)
+            else:
+                raise
         report("视频轨完成，正在下载音频…", 55.0)
-        if audio_path:
-            await _download(captured["audio"], audio_path)
         report("下载完成", 96.0)
 
         duration = await _probe_duration(video_path)
@@ -434,7 +498,18 @@ async def download_merged(
         v_tmp = os.path.join(tmp_dir, "v.mp4")
         a_tmp = os.path.join(tmp_dir, "a.m4a") if captured["audio"] else None
         try:
-            await _download(captured["video"], v_tmp)
+            try:
+                await _download(captured["video"], v_tmp)
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code in (401, 403, 404):
+                    notify(8.0, "视频地址过期，重新获取…")
+                    _cache_drop(video_id)
+                    captured = await _capture(video_id)
+                    handler._cache[video_id] = captured
+                    a_tmp = os.path.join(tmp_dir, "a.m4a") if captured["audio"] else None
+                    await _download(captured["video"], v_tmp)
+                else:
+                    raise
             notify(45.0, "正在下载音频轨…")
             if a_tmp:
                 await _download(captured["audio"], a_tmp)
