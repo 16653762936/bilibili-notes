@@ -86,6 +86,7 @@ class ConfigRequest(BaseModel):
     deepseek_api_key: Optional[str] = None
     save_path: Optional[str] = None
     download_path: Optional[str] = None
+    knowledge_background: Optional[str] = None
     max_chars: Optional[int] = None
     prompt_template: Optional[str] = None
     sessdata: Optional[str] = None
@@ -367,6 +368,7 @@ async def process_video_background(
             },
             note_style=note_style,
             on_progress=on_summarize,
+            reader_background=cfg.get("knowledge_background", "") or "",
         )
         result["title"] = title
         result["url"] = clean_url

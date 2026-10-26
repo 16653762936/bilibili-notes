@@ -8,7 +8,7 @@
     <link rel="apple-touch-icon" href="/logo-180.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bilibili Notes</title>
-    <script type="module" crossorigin src="/assets/index-01b642aa.js"></script>
+    <script type="module" crossorigin src="/assets/index-e7a287e8.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-Dn4-zp63.css">
     <style>
       /* 用图片 logo 替换顶栏与空状态里原来的内联 SVG 图标 */
@@ -281,22 +281,38 @@
       });
   }
 
-  /* ---------- 设置页那颗「视频下载目录」----------
-   * 它是我们注入的、不属于 React 的 state，所以值从后端现取、原生事件存回，
+  /* ---------- 设置页里我们注入的字段 ----------
+   * 它们不属于 React 的 state，所以值从后端现取、原生事件存回，
    * 避免和 React 自己的保存流程打架。
    */
-  function syncSettingsField() {
-    var input = document.getElementById("ds-cfg-download-dir");
+  function bindConfigField(id, key) {
+    var input = document.getElementById(id);
     if (!input) return;
-
     if (input.dataset.dsBound !== "1") {
       input.dataset.dsBound = "1";
-      var persist = function () { window.__dshSetDownloadDir(input.value); };
+      var persist = function () {
+        var body = {};
+        body[key] = input.value;
+        postJSON("/api/config", body).catch(function () {});
+      };
       input.addEventListener("change", persist);
       input.addEventListener("focusout", persist);
     }
+    if (input.dataset.dsSynced === "1") return;
+    input.dataset.dsSynced = "1";
+    getJSON("/api/config").then(function (cfg) {
+      if (document.activeElement !== input) {
+        input.value = (cfg && cfg[key]) || "";
+      }
+    }).catch(function () {});
+  }
 
-    if (!document.getElementById("ds-cfg-browse")) {
+  function syncSettingsField() {
+    bindConfigField("ds-cfg-download-dir", "download_path");
+    bindConfigField("ds-cfg-knowledge-bg", "knowledge_background");
+
+    var input = document.getElementById("ds-cfg-download-dir");
+    if (input && !document.getElementById("ds-cfg-browse")) {
       var row = document.createElement("div");
       row.style.cssText = "display:flex;gap:8px;align-items:center";
       input.parentNode.insertBefore(row, input);
@@ -311,14 +327,6 @@
       btn.onclick = function () { pickDir(input); };
       row.appendChild(btn);
     }
-
-    if (input.dataset.dsSynced === "1") return;
-    input.dataset.dsSynced = "1";
-    getJSON("/api/config").then(function (cfg) {
-      if (document.activeElement !== input) {
-        input.value = (cfg && cfg.download_path) || "";
-      }
-    }).catch(function () {});
   }
 
   function watchSettingsField() {
@@ -336,7 +344,6 @@
 
   watchSettingsField();
 })();
-
     </script>
   </body>
 </html>

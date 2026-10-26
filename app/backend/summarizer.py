@@ -274,12 +274,78 @@ _BASE_RULES = """
 - 只输出 JSON，不要任何解释文字"""
 
 
-def _build_system_prompt(note_style: Optional[str], prompt_template: str, schema: str, extra: str = "") -> str:
+# 讲解方法：这一块决定了笔记「能不能看懂」。
+# 之前只写了「解释清楚」，模型就会用术语解释术语，读者只看懂了字。
+_TEACHING_RULES = """
+## 讲解要求（优先级最高，高于篇幅和精简要求）
+
+判断标准只有一条：**一个没接触过这个领域的人读完，能不能用自己的话讲给别人听。**
+如果只是把术语换成另一种说法，就算失败。
+
+### 每条知识点按这个顺序写
+1. **先给结论**：一句话说清「这条讲的是什么、为什么值得关心」。
+2. **再给动机**：它解决什么问题？没有它会怎样？最好用「有它 / 没它」的对比。
+3. **然后才是定义或公式**：这时读者已经有挂靠点了，术语才有地方放。
+4. **必须有一个具体例子**：能算出来、能在脑子里想出画面的那种。
+   抽象概念配一个生活化类比（类比要落在日常经验上，不要用另一个专业领域打比方）。
+5. **指出常见误解或踩坑点**（如果这个知识点有的话）。
+
+### 硬性禁止
+- **用术语解释术语**。任何术语第一次出现，必须当场用大白话说明「它大概是个什么东西、
+  为什么叫这个名字」，再往下讲。
+- 「简单来说」「顾名思义」「本质上就是」之后接更抽象的话。
+- 只有形容词没有机制：如「性能大幅提升」「非常灵活优雅」，
+  必须换成「提升了多少 / 为什么灵活 / 什么时候会变慢」。
+- 同义反复：如「缓存就是缓存数据的地方」这种没有信息量的循环解释。
+- 把视频原话原封不动搬过来当作解释。
+
+### 自查（输出前必做）
+逐条检查 details 的 content：里面出现的每一个专业名词，前面是否已经用大白话交代过？
+没有就在那句话里补上。宁可多一句解释，也不要留一个悬空术语。
+
+### 按笔记类型取舍
+- 「简略笔记」的 summary 保持简短（30 秒判断值不值得看），但 terms 和 details 仍按上面讲清楚。
+- 「简略知识笔记」可以少写几条，但每条都要讲透，不要为了凑条数写成空壳。
+- 如果视频本身没讲清某个点，明确写「（视频里没讲透）」，不要用空话填满。
+"""
+
+
+def _reader_profile(background: str) -> str:
+    """读者画像：据此决定哪些要铺垫、哪些可以直接讲。"""
+    text = (background or "").strip()
+    if not text:
+        return (
+            "## 读者画像\n"
+            "用户没有填写自己的知识背景。默认按「聪明、但完全不懂这个领域」处理：\n"
+            "遇到领域内的前置概念要先补一句，不要假设读者知道。"
+        )
+    return (
+        "## 读者画像（据此决定铺垫的详略）\n"
+        f"{text}\n\n"
+        "用法：\n"
+        "- 读者**已经熟悉**的领域：不要从零讲基础，直接讲这条视频里的新东西、易错点。\n"
+        "- 读者**只会一点**的领域：先补一句他能接上的位置，再讲新的。\n"
+        "- 读者**没提到**的领域：按完全新手处理，先解释前置概念再讲正题。"
+    )
+
+
+def _build_system_prompt(
+    note_style: Optional[str],
+    prompt_template: str,
+    schema: str,
+    extra: str = "",
+    reader_background: str = "",
+) -> str:
     style = style_config(note_style)
     parts = [
-        "你是专业的视频笔记整理助手，把视频转录整理成结构化知识笔记。",
+        "你是擅长把技术讲明白的老师，把视频转录整理成结构化知识笔记。",
+        "你的读者是「想学但还不懂」的人，不是同行评审。",
         "",
         style["instructions"],
+        "",
+        _TEACHING_RULES,
+        "",
+        _reader_profile(reader_background),
         "",
         "## 输出格式",
         "严格按下面的 JSON 结构输出：",
@@ -366,6 +432,7 @@ async def summarize_text(
     meta: Optional[dict] = None,
     note_style: str = DEFAULT_NOTE_STYLE,
     on_progress: Optional[Callable[[str, int, int], None]] = None,
+    reader_background: str = "",
 ) -> dict:
     """按笔记类型生成结构化笔记（不含精校文稿）。"""
     if not api_key:
@@ -394,10 +461,14 @@ async def summarize_text(
 
     if style["chunked"] and len(text) > DETAILS_CHUNK_CHARS:
         result = await _summarize_chunked(
-            client, text, header, note_style, prompt_template, on_progress
+            client, text, header, note_style, prompt_template, on_progress,
+            reader_background=reader_background,
         )
     else:
-        result = await _summarize_once(client, text, header, note_style, prompt_template)
+        result = await _summarize_once(
+            client, text, header, note_style, prompt_template,
+            reader_background=reader_background,
+        )
 
     if not result.get("note_title"):
         result["note_title"] = title or "视频笔记"
@@ -443,8 +514,12 @@ async def _call_json(
     return parsed
 
 
-async def _summarize_once(client, text, header, note_style, prompt_template) -> dict:
-    system_prompt = _build_system_prompt(note_style, prompt_template, NOTE_SCHEMA)
+async def _summarize_once(
+    client, text, header, note_style, prompt_template, reader_background: str = ""
+) -> dict:
+    system_prompt = _build_system_prompt(
+        note_style, prompt_template, NOTE_SCHEMA, reader_background=reader_background
+    )
     user_prompt = f"{header}\n转录内容：\n{text}"
     parsed = await _call_json(client, system_prompt, user_prompt)
 
@@ -456,7 +531,8 @@ async def _summarize_once(client, text, header, note_style, prompt_template) -> 
 
 
 async def _summarize_chunked(
-    client, text, header, note_style, prompt_template, on_progress
+    client, text, header, note_style, prompt_template, on_progress,
+    reader_background: str = "",
 ) -> dict:
     """map-reduce：逐段抽取知识点，再汇总成概括与大纲。
 
@@ -476,6 +552,7 @@ async def _summarize_chunked(
             "- 不要凭空补充其他段落可能有的内容\n"
             "- 顺序必须与原文一致"
         ),
+        reader_background=reader_background,
     )
 
     semaphore = asyncio.Semaphore(2)
