@@ -23,8 +23,19 @@ set "PYTHONIOENCODING=utf-8"
 set "PYTHONPATH=%ROOT%app"
 
 if not exist "%PY%" (
-  echo [错误] 找不到 python\python.exe
-  echo        请确认整个文件夹是一起解压的，没有单独挪动里面的文件。
+  echo [错误] 这个目录里没有便携运行时 ^(%ROOT%python\python.exe^)
+  echo.
+  if exist "%ROOT%app\backend\main.py" (
+    echo        这看起来是「源码目录」：源码包里不包含运行时。
+    echo        python / ffmpeg / models 合计约 660MB，受 GitHub 单文件限制没有入库。
+    echo.
+    echo        想直接使用：请打开便携版目录里的 启动.bat
+    echo        想从源码运行：见 README 的「方式二：从源码跑」
+    echo                      需要 Python 3.12 + ffmpeg，并先执行：
+    echo                      pip install -r app\requirements.txt
+  ) else (
+    echo        请确认整个文件夹是一起解压的，没有单独挪动里面的文件。
+  )
   goto :fail
 )
 if not exist "%ROOT%ffmpeg\bin\ffmpeg.exe" (
