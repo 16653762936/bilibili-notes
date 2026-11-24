@@ -887,6 +887,24 @@ async def note_asset(note: str, src: str):
     return FileResponse(target)
 
 
+@app.get("/api/assets/{name}")
+async def cache_asset(name: str):
+    """Serve a screenshot from the cache.
+
+    生成完的预览页会用 ``/api/assets/<文件名>`` 显示细节截图缩略图，
+    但后端以前没有这个路由，那些缩略图全是 404 —— 界面上看着有图位，
+    实际一张都加载不出来。
+    """
+    assets_dir = os.path.realpath(os.path.join(CACHE_DIR, "assets"))
+    safe = os.path.basename(name or "")
+    if not safe:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    target = os.path.realpath(os.path.join(assets_dir, safe))
+    if not target.startswith(assets_dir + os.sep) or not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail="图片不存在")
+    return FileResponse(target, media_type=sniff_image_media_type(target))
+
+
 def sniff_image_media_type(path: str) -> str:
     """缓存文件统一叫 ``.img``，扩展名推不出类型，就按文件头嗅探。
 

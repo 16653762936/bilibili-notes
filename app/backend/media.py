@@ -313,12 +313,46 @@ async def mux_async(video_path: str, audio_path: str, out_path: str) -> bool:
     return await asyncio.to_thread(mux, video_path, audio_path, out_path)
 
 
+
+def _ytdlp_module_dir() -> Optional[str]:
+    """实际会被调用的 yt-dlp 所在位置（便于排查"用的是哪个"）。"""
+    try:
+        import yt_dlp  # type: ignore
+        return os.path.dirname(getattr(yt_dlp, "__file__", "") or "") or None
+    except Exception:  # noqa: BLE001
+        return find_tool("yt-dlp")
+
+
+def ytdlp_version() -> Optional[str]:
+    """当前实际会用的 yt-dlp 版本。"""
+    try:
+        from yt_dlp.version import __version__ as v  # type: ignore
+        return v
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def ytdlp_command() -> list[str]:
+    """构造调用 yt-dlp 的命令。
+
+    便携包**优先用自带的 yt_dlp 模块**：``find_tool('yt-dlp')`` 会先在 PATH 里
+    找到系统 Python 装的那个 yt-dlp.exe，版本可能比包里的旧很多，
+    结果就是"包里升级了但实际没用上"，B 站接口一变就下载失败。
+    """
+    if bundle_root():
+        return [sys.executable, "-m", "yt_dlp"]
+    exe = find_tool("yt-dlp")
+    return [exe] if exe else [sys.executable, "-m", "yt_dlp"]
+
+
 def tooling_report() -> dict:
     """Diagnostics surfaced in the UI so PATH problems are visible, not silent."""
     return {
         "ffmpeg": ffmpeg_path(),
         "ffprobe": ffprobe_path(),
-        "yt_dlp": find_tool("yt-dlp"),
+        "yt_dlp": _ytdlp_module_dir(),
+        "yt_dlp_version": ytdlp_version(),
+        "yt_dlp_command": " ".join(ytdlp_command()),
         "platform": "windows" if IS_WINDOWS else ("macos" if IS_MACOS else sys.platform),
         "bundle_root": bundle_root(),
     }

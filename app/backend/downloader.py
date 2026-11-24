@@ -18,6 +18,7 @@ from typing import Callable, Optional
 from urllib.parse import urlsplit
 
 from . import media
+from .config import ytdlp_cookie_args, ytdlp_page_args
 
 # yt-dlp 的输出里，这几行决定了最终文件名
 _PERCENT = re.compile(r"\[download\]\s+([\d.]+)%")
@@ -41,6 +42,9 @@ _BARE_HOST = re.compile(
 _BV_IN_TEXT = re.compile(r"BV[0-9A-Za-z]{10}")
 _AV_IN_TEXT = re.compile(r"\bav(\d{1,12})\b", re.I)
 _TRAILING = "。，,.、；;！!？?）)】]}>\"'"
+
+# 多久没有任何下载进展就判定卡死
+STALL_SECONDS = int(os.environ.get("MYBOX_DL_STALL", "180"))
 
 
 def normalize_video_url(raw: str) -> str:
@@ -139,10 +143,25 @@ def friendly_error(raw: str, url: str = "") -> str:
     return first[:200] or "下载失败，但 yt-dlp 没有给出原因"
 
 
+def _log_download_failure(url: str, lines: list[str]) -> str:
+    """把失败详情写到 ~/.bilibili-notes/logs/，下次失败能查。"""
+    try:
+        log_dir = os.path.join(os.path.expanduser("~/.bilibili-notes"), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        path = os.path.join(log_dir, time.strftime("download-%Y%m%d-%H%M%S.log"))
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"url: {url}\n")
+            f.write(f"yt-dlp: {' '.join(media.ytdlp_command())}\n")
+            f.write(f"version: {media.ytdlp_version()}\n\n")
+            f.write("\n".join(lines[-400:]))
+        return path
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def ytdlp_command() -> list[str]:
-    """优先用独立可执行文件，没有就退回 ``python -m yt_dlp``。"""
-    exe = media.find_tool("yt-dlp")
-    return [exe] if exe else [sys.executable, "-m", "yt_dlp"]
+    """构造调用命令（便携包内优先用自带模块，见 media.ytdlp_command）。"""
+    return media.ytdlp_command()
 
 
 def _format_selector(quality: str) -> str:
@@ -191,14 +210,17 @@ async def download_video(
         "--merge-output-format", "mp4",
         "--ffmpeg-location", ffmpeg_dir,
         "-o", output_template,
-        "--no-playlist",
+        *ytdlp_page_args(url),          # 分 P 视频要落到具体那一 P
+        *ytdlp_cookie_args(),           # 设置了 B 站 Cookie 就带上，否则高清/需登录的视频会失败
         "--no-mtime",
         "--no-overwrites",
         "--windows-filenames",
         "--newline",
         "--progress",
-        "--retries", "5",
-        "--fragment-retries", "5",
+        "--retries", "10",
+        "--fragment-retries", "10",
+        "--extractor-retries", "3",
+        "--socket-timeout", "20",
         "--concurrent-fragments", "4",
         url,
     ]
@@ -306,15 +328,42 @@ async def download_video(
                 line, buffer = buffer.split("\n", 1)
                 handle_line(line)
 
+        # 卡死保护：yt-dlp 偶尔会没有任何输出地挂住（网络半死、需要登录却
+        # 在等验证），原来没有超时，用户看到的就是"一直转圈"。
+        # 合并阶段是本地 CPU 干活，可能长时间没输出，所以不参与判定。
+        last_activity = time.time()
         while proc.returncode is None:
             await asyncio.sleep(0.35)
+            before = read_pos
             consume()
+            if read_pos != before:
+                last_activity = time.time()
+                continue
+            if merges:
+                last_activity = time.time()
+                continue
+            if time.time() - last_activity > STALL_SECONDS:
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+                await proc.wait()
+                consume()
+                raise DownloadError(
+                    f"下载卡住了（{STALL_SECONDS} 秒没有任何进展），已自动中止。"
+                    "可以重试一次；如果反复卡住，多半是这条视频需要登录或站点在限流，"
+                    "去设置里补上对应的 Cookie 再试。"
+                )
         await proc.wait()
         consume()
         handle_line(buffer)
 
         if errors and proc.returncode != 0:
-            raise DownloadError(friendly_error(errors[0], url))
+            log_path = _log_download_failure(url, errors)
+            message = friendly_error(errors[0], url)
+            if log_path:
+                message += f"（详细日志：{log_path}）"
+            raise DownloadError(message)
 
         path = await _resolve_output(
             dest_dir, merges, destinations, alreadies, started

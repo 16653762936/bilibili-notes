@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tempfile
 from typing import Callable, Optional
 
@@ -20,6 +21,8 @@ from bilibili_api import video, Credential
 from bilibili_api.utils.aid_bvid_transformer import aid2bvid
 
 from . import media
+from .config import ytdlp_cookie_args, ytdlp_page_args
+from .downloader import STALL_SECONDS
 
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -271,8 +274,7 @@ class BilibiliHandler:
 
         # 找到 yt-dlp 可执行文件就用它；找不到（便携包 wheel 手动解包不生成控制台
         # 脚本）就用 `python -m yt_dlp`，两者行为一致。
-        yt_dlp_exe = media.find_tool("yt-dlp")
-        yt_dlp_cmd = [yt_dlp_exe] if yt_dlp_exe else [sys.executable, "-m", "yt_dlp"]
+        yt_dlp_cmd = media.ytdlp_command()
         output_template = os.path.join(cache_dir, f"{bvid}.%(ext)s")
 
         cmd = [
@@ -281,12 +283,15 @@ class BilibiliHandler:
             "--merge-output-format", "mp4",
             "--ffmpeg-location", ffmpeg_dir,
             "-o", output_template,
-            "--no-playlist",
+            *ytdlp_page_args(url),
+            *ytdlp_cookie_args(),
             "--no-mtime",
             "--newline",
             "--progress",
-            "--retries", "5",
-            "--fragment-retries", "5",
+            "--retries", "10",
+            "--fragment-retries", "10",
+            "--extractor-retries", "3",
+            "--socket-timeout", "20",
             "--concurrent-fragments", "4",
             "--user-agent", UA,
             "--referer", "https://www.bilibili.com/",
@@ -432,9 +437,23 @@ class BilibiliHandler:
                     env=media.child_env(),
                 )
 
+            # 卡死保护：见 downloader.STALL_SECONDS 的说明
+            last_activity = time.time()
             while proc.returncode is None:
                 await asyncio.sleep(0.4)
+                before = read_pos[0]
                 consume()
+                if read_pos[0] != before:
+                    last_activity = time.time()
+                    continue
+                if time.time() - last_activity > STALL_SECONDS:
+                    try:
+                        proc.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    await proc.wait()
+                    consume()
+                    return -9, ["ERROR: 下载卡住了（长时间没有任何进展），已自动中止"]
             await proc.wait()
             consume()
             handle(buffer.strip())

@@ -4,6 +4,7 @@ Settings are persisted to ~/.bilibili-notes/config.json
 """
 import json
 import os
+import re
 
 CONFIG_DIR = os.path.expanduser("~/.bilibili-notes")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
@@ -77,3 +78,34 @@ def public_config() -> dict:
         "api_key_hint": (key[:6] + "…" + key[-4:]) if len(key) > 12 else "",
         "has_credential": bool(cfg["sessdata"]),
     }
+
+
+def ytdlp_cookie_args() -> list[str]:
+    """把设置里的 B 站 Cookie 转成 yt-dlp 参数。
+
+    之前 yt-dlp 这一路完全没带 Cookie：需要登录才有的清晰度、番剧、
+    部分影视会直接失败或只能拿到最低清，而「生成笔记」那边用的是
+    bilibili_api + Credential，两边行为不一致。
+    """
+    cfg = load_config()
+    sess = (cfg.get("sessdata") or "").strip()
+    if not sess:
+        return []
+    jct = (cfg.get("bili_jct") or "").strip()
+    cookie = f"SESSDATA={sess}"
+    if jct:
+        cookie += f"; bili_jct={jct}"
+    return ["--add-header", f"Cookie: {cookie}"]
+
+
+def ytdlp_page_args(url: str) -> list[str]:
+    """分 P 视频（?p=3）要指定具体那一 P。
+
+    yt-dlp 对多 P 视频返回的是播放列表，原来固定带 --no-playlist，
+    结果不管点第几 P，下到的永远是第 1 P。
+    """
+    m = re.search(r"[?&]p=(\d+)", url or "")
+    if not m:
+        return ["--no-playlist"]
+    page = m.group(1)
+    return ["--playlist-items", page]
