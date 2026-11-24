@@ -30,9 +30,9 @@ if not exist "%PY%" (
     echo        python / ffmpeg / models 合计约 660MB，受 GitHub 单文件限制没有入库。
     echo.
     echo        想直接使用：请打开便携版目录里的 启动.bat
-    echo        想从源码运行：见 README 的「方式二：从源码跑」
-    echo                      需要 Python 3.12 + ffmpeg，并先执行：
-    echo                      pip install -r app\requirements.txt
+    echo        想从源码运行：先装 Python 3.10+ 和 ffmpeg，
+    echo                      然后双击运行本目录里的「从源码启动.bat」
+    echo                      ^(它会自动建虚拟环境并安装依赖^)
   ) else (
     echo        请确认整个文件夹是一起解压的，没有单独挪动里面的文件。
   )

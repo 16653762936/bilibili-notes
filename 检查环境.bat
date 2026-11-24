@@ -26,7 +26,7 @@ if exist "%PY%" (
   echo     X  找不到 python\python.exe
   if exist "%ROOT%app\backend\main.py" (
     echo        这是源码目录，本身不含便携运行时；直接用请打开便携版的 启动.bat。
-    echo        从源码运行见 README「方式二：从源码跑」。
+    echo        从源码运行：先装 Python 3.10+ 和 ffmpeg，再双击「从源码启动.bat」。
   )
 )
 echo.
