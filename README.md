@@ -84,7 +84,38 @@
 
 出问题先双击 `检查环境.bat`，它会逐项检查 Python / 依赖 / C 扩展 / ffmpeg / 模型 / 配置 / 磁盘占用。
 
-### 方式二：从源码跑（最简单是双击 `从源码启动.bat`）
+### 方式二：从源码跑（clone 下来的情况）
+
+需要 **Python 3.10+**、**ffmpeg**、以及一个 DeepSeek API Key。
+下面的流程已实测：干净 clone → 建虚拟环境 → 装依赖 → 起服务 → `/api/health` 正常。
+
+```powershell
+# 1. 克隆
+git clone https://github.com/16653762936/bilibili-notes.git
+cd bilibili-notes
+
+# 2. 双击 从源码启动.bat 即可（自动完成 3~5 步）
+#    想手动来就继续往下：
+
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r app\requirements.txt `
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+$env:PYTHONUTF8 = "1"
+$env:PYTHONPATH = "$(Get-Location)\app"
+.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 17365 --loop asyncio
+```
+
+然后浏览器打开 <http://127.0.0.1:17365/>，在右上角**设置**里填 DeepSeek API Key。
+
+补充说明：
+
+- **ffmpeg**：如果 `ffmpeg` 已在 PATH 里（`winget install Gyan.FFmpeg` 或官网压缩包），
+  程序会自动找到；也可以放到 `ffmpeg\bin\`，或用 `MYBOX_FFMPEG` / `MYBOX_FFPROBE` 指定。
+- **语音模型**：首次生成笔记会从 HuggingFace 下载 faster-whisper 模型（约 140MB）。
+  国内下载卡住时先执行 `set HF_ENDPOINT=https://hf-mirror.com` 再启动。
+- **B 站 Cookie（可选）**：不填也能用；填了能直接读官方字幕、下更高清晰度。
+- 笔记默认写到 `notes\bilibilinote`，可在设置里改成你的 Obsidian 仓库。
 
 需要 **Python 3.12**、**ffmpeg**（`ffmpeg` 与 `ffprobe` 都要）。
 

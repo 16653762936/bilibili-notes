@@ -85,6 +85,15 @@ if not exist "%ROOT%ffmpeg\bin\ffmpeg.exe" (
   echo.
 )
 
+rem ---------- 语音模型 ----------
+if not exist "%ROOT%models\faster-whisper-base\model.bin" (
+  echo [提示] 没找到内置语音模型。首次「生成笔记」时会自动从 HuggingFace 下载
+  echo        faster-whisper 模型（约 140MB），只下一次。
+  echo        如果下载卡住或超时，先设置镜像再重跑本脚本：
+  echo          set HF_ENDPOINT=https://hf-mirror.com
+  echo.
+)
+
 rem ---------- 运行环境 ----------
 set "MYBOX_HOME=%ROOT%"
 if exist "%ROOT%ffmpeg\bin\ffmpeg.exe" (
