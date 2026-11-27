@@ -183,6 +183,65 @@ def format_duration_short(seconds) -> str:
     return format_duration(seconds) or ""
 
 
+# --------------------------------------------------------------- 网络自愈
+# bilibili_api 会把 httpx 客户端按事件循环缓存在全局 session_pool 里。
+# 进程长时间运行（或电脑休眠唤醒）后，这个缓存的连接会失效，
+# 于是之后每一次请求都报 "All connection attempts failed"，只能重启软件。
+# 这里在遇到连接类错误时主动清掉缓存并重试，让它自己恢复。
+_NETWORK_ERROR_HINTS = (
+    "All connection attempts failed",
+    "ConnectError",
+    "ConnectTimeout",
+    "ReadTimeout",
+    "WriteTimeout",
+    "PoolTimeout",
+    "NetworkException",
+    "ServerDisconnectedError",
+    "RemoteProtocolError",
+    "Connection reset",
+    "Connection aborted",
+)
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}"
+    return any(hint.lower() in text.lower() for hint in _NETWORK_ERROR_HINTS)
+
+
+def _reset_bilibili_sessions() -> None:
+    """丢掉 bilibili_api 缓存的 HTTP 客户端，下次调用会重新建。"""
+    try:
+        from bilibili_api.utils import network as bili_network
+
+        pool = getattr(bili_network, "session_pool", None)
+        if isinstance(pool, dict):
+            for sub in pool.values():
+                if isinstance(sub, dict):
+                    sub.clear()
+    except Exception:  # noqa: BLE001 - 清理失败不该影响主流程
+        pass
+
+
+async def parse_video_with_retry(handler, target: str, attempts: int = 3):
+    """解析视频信息；遇到网络类错误时重置连接并重试。"""
+    last: Optional[BaseException] = None
+    for attempt in range(attempts):
+        try:
+            return await handler.parse_video(target)
+        except Exception as exc:  # noqa: BLE001
+            if not _is_network_error(exc):
+                raise
+            last = exc
+            _reset_bilibili_sessions()
+            if attempt < attempts - 1:
+                await asyncio.sleep(1.5 * (attempt + 1))
+    raise BilibiliError(
+        "连不上 B 站接口（网络或代理问题）。已自动重置连接并重试 "
+        f"{attempts} 次，仍然失败。如果软件已经开了很久，重启一次通常就好；"
+        "如果一直失败，请检查系统代理 / VPN 设置。"
+    ) from last
+
+
 def build_video_handler(url: str):
     """按站点挑处理器。
 
@@ -257,7 +316,7 @@ async def process_video_background(
     try:
         # 1 ── parse ---------------------------------------------------------
         emit_progress("parsing", "正在解析视频信息…", 4)
-        info = await handler.parse_video(url)
+        info = await parse_video_with_retry(handler, url)
         title = info["title"]
         bvid = info["bvid"] or info.get("epid") or "video"
         clean_url = info["url"]
@@ -570,7 +629,7 @@ async def inspect_video(req: InspectRequest):
     target = normalize_video_url(req.url) or req.url
     handler = build_video_handler(target)
     try:
-        info = await handler.parse_video(target)
+        info = await parse_video_with_retry(handler, target)
         return {"ok": True, "video": info, "tooling": media.tooling_report()}
     except BilibiliError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

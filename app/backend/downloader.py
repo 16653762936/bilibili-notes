@@ -105,6 +105,12 @@ _FRIENDLY: tuple[tuple[re.Pattern, str], ...] = (
         "这个视频当前不可访问（可能已删除、私有或限制地区）。",
     ),
     (
+        re.compile(r"All connection attempts failed|ConnectError|Connection reset|"
+                   r"Failed to establish a new connection", re.I),
+        "连不上视频站点（网络或代理问题）。检查一下网络/VPN；"
+        "如果软件开了很久才出现，重启一次软件通常就好。",
+    ),
+    (
         re.compile(r"Too Many Requests|HTTP Error 429|HTTP Error 412", re.I),
         "站点限流了，等 1~2 分钟再试；频繁下载同一个站点容易被拦。",
     ),
